@@ -249,6 +249,7 @@ export function renderExercises(items, modes) {
   let recordValue = currentItem;
   let historyFormatter = value => `${value}`;
   let acceptedAnswers = null;
+  let validation = null;
 
   if (!isObject) {
     let expr = currentItem;
@@ -290,6 +291,7 @@ export function renderExercises(items, modes) {
     }
     recordValue = currentItem;
     historyFormatter = userValue => `${promptText}${userValue}`;
+    validation = currentItem.validation || null;
   }
 
   const createInput = () => {
@@ -298,7 +300,23 @@ export function renderExercises(items, modes) {
     const answersForLength = Array.isArray(acceptedAnswers) && acceptedAnswers.length > 0
       ? acceptedAnswers
       : [correctStr];
-    const maxLength = Math.max(1, ...answersForLength.map(ans => ans.length));
+    let baseLengths = answersForLength
+      .map(ans => {
+        const asString = typeof ans === 'string' ? ans : String(ans ?? '');
+        return asString.length;
+      })
+      .filter(len => Number.isFinite(len) && len > 0);
+    if (baseLengths.length === 0) {
+      const fallback = String(correctStr ?? '').length;
+      baseLengths = [fallback > 0 ? fallback : 1];
+    }
+    let maxLength = Math.max(1, ...baseLengths);
+    if (validation?.type === 'numeric') {
+      const suggested = typeof validation?.maxLength === 'number' ? validation.maxLength : Math.max(maxLength, 6);
+      maxLength = Math.max(1, suggested);
+    } else if (typeof validation?.maxLength === 'number') {
+      maxLength = Math.max(1, validation.maxLength);
+    }
     input.maxLength = maxLength;
     input.className = 'answer-input';
     input.setAttribute('readonly', 'true');
@@ -316,7 +334,8 @@ export function renderExercises(items, modes) {
       correctAnswer: correctStr,
       acceptedAnswers,
       recordValue,
-      historyFormatter
+      historyFormatter,
+      validation
     });
   };
 
@@ -333,31 +352,90 @@ export function renderExercises(items, modes) {
   createInput();
 }
 
-  function attachValidation({ inputEl, correctAnswer, acceptedAnswers, recordValue, historyFormatter }) {
+  function attachValidation({ inputEl, correctAnswer, acceptedAnswers, recordValue, historyFormatter, validation }) {
     let firstTry = true;
     let timer = null;
 
     const answers = Array.isArray(acceptedAnswers) && acceptedAnswers.length > 0
       ? acceptedAnswers
       : [correctAnswer];
-    const normalizedAnswers = answers.map(value => value.replace(/\s+/g, '').toUpperCase());
-    const lengths = answers.map(ans => ans.length);
-    const maxLength = Math.max(1, ...lengths);
+
+    let lengths = answers
+      .map(ans => {
+        const asString = typeof ans === 'string' ? ans : String(ans ?? '');
+        return asString.length;
+      })
+      .filter(len => Number.isFinite(len) && len > 0);
+    if (lengths.length === 0) {
+      const fallback = String(correctAnswer ?? '').length;
+      lengths = [fallback > 0 ? fallback : 1];
+    }
+
+    let maxLength = inputEl.maxLength && inputEl.maxLength > 0 ? inputEl.maxLength : Math.max(1, ...lengths);
+    if (validation?.type === 'numeric' && typeof validation?.maxLength === 'number') {
+      maxLength = Math.max(1, validation.maxLength);
+    }
+
+    const normalizedAnswers = validation?.type === 'numeric'
+      ? []
+      : answers.map(value => String(value ?? '').replace(/\s+/g, '').toUpperCase());
+
+    const decimals = typeof validation?.decimals === 'number' ? validation.decimals : 1;
+    const multiplier = Math.pow(10, decimals);
+    let numericTarget = null;
+    if (validation?.type === 'numeric') {
+      if (typeof validation.target === 'number' && Number.isFinite(validation.target)) {
+        numericTarget = Math.round(validation.target * multiplier) / multiplier;
+      } else {
+        const parsed = parseFloat(String(correctAnswer ?? '').replace(',', '.'));
+        if (Number.isFinite(parsed)) {
+          numericTarget = Math.round(parsed * multiplier) / multiplier;
+        }
+      }
+    }
+
+    const numericMinLength = validation?.type === 'numeric'
+      ? (typeof validation?.minLength === 'number'
+          ? Math.max(1, validation.minLength)
+          : Math.max(1, String(correctAnswer ?? '').replace(/\s+/g, '').length))
+      : null;
+
     inputEl.removeAttribute('readonly');
+
+    const evaluateAnswer = userValue => {
+      if (validation?.type === 'numeric') {
+        if (!Number.isFinite(numericTarget)) return false;
+        const normalized = userValue.replace(',', '.');
+        if (normalized === '') return false;
+        const parsed = Number(normalized);
+        if (!Number.isFinite(parsed)) return false;
+        const rounded = Math.round(parsed * multiplier) / multiplier;
+        return Math.abs(rounded - numericTarget) < 1e-9;
+      }
+      const normalized = userValue.replace(/\s+/g, '').toUpperCase();
+      return normalizedAnswers.includes(normalized);
+    };
+
+    const shouldValidate = userValue => {
+      if (validation?.type === 'numeric') {
+        const cleanedLength = userValue.replace(/\s+/g, '').length;
+        return cleanedLength >= (numericMinLength ?? 1);
+      }
+      return lengths.includes(userValue.length);
+    };
 
     const validate = () => {
       clearTimeout(timer);
       const userValue = inputEl.value.trim();
 
-      if (userValue.length > maxLength) {
+      if (maxLength > 0 && userValue.length > maxLength) {
         inputEl.value = userValue.slice(0, maxLength);
         return;
       }
 
-      if (lengths.includes(userValue.length)) {
+      if (shouldValidate(userValue)) {
         timer = setTimeout(() => {
-          const normalized = userValue.replace(/\s+/g, '').toUpperCase();
-          const isCorrect = normalizedAnswers.includes(normalized);
+          const isCorrect = evaluateAnswer(userValue);
 
           if (!isCorrect) {
             const row = inputEl.closest('.exercise-row');

@@ -81,6 +81,23 @@ const selectedEquitiPractBets = new Set();     // 1/4 .. 2x
 const selectedEquitiTeorFormats = new Set();   // percent, ratio
 const selectedEquitiTeorTypes = new Set();     // eq, ratio, viceversa_eq, viceversa_ratio
 
+// --- Estado para SPR ---------------------------------------------------------
+let sprPracticoData = null;
+let sprPracticoPromise = null;
+const selectedSprPracticoStacks = new Set();
+const selectedSprPracticoPots = new Set();
+const sprPracticoStackButtons = [];
+const sprPracticoPotButtons = [];
+
+const sprFlashcardSources = {
+  interpretacion: { file: './SprInterpretacionPreguntas.json', data: null, promise: null },
+  ejemplos: { file: './SprEjemplosPreflop.json', data: null, promise: null },
+  manos: { file: './SprManosPreguntas.json', data: null, promise: null },
+  teoria: { file: './SprTeoricoPreguntas.json', data: null, promise: null }
+};
+const selectedSprFlashcards = new Set();
+const sprFlashcardButtons = [];
+
 // Velocidades disponibles para el modo Fugues (para referencia)
 const speedMap = {
   '1H': 200,
@@ -144,6 +161,42 @@ function loadEquitiTeoricoData() {
       });
   }
   return equitiTeorPromise;
+}
+
+function loadSprPracticoData() {
+  if (!sprPracticoPromise) {
+    sprPracticoPromise = fetch('./SprPracticoPreguntas.json')
+      .then(resp => resp.json())
+      .then(data => {
+        sprPracticoData = Array.isArray(data) ? data : [];
+      })
+      .catch(() => {
+        sprPracticoData = [];
+      })
+      .finally(() => {
+        updateRunButtonState();
+      });
+  }
+  return sprPracticoPromise;
+}
+
+function loadSprFlashcardData(key) {
+  const source = sprFlashcardSources[key];
+  if (!source) return Promise.resolve();
+  if (!source.promise) {
+    source.promise = fetch(source.file)
+      .then(resp => resp.json())
+      .then(data => {
+        source.data = Array.isArray(data) ? data : [];
+      })
+      .catch(() => {
+        source.data = [];
+      })
+      .finally(() => {
+        updateRunButtonState();
+      });
+  }
+  return source.promise;
 }
 
 function setButtonDisabled(btn, disabled) {
@@ -217,7 +270,19 @@ export function computePotOddsSelection() {
       }
       return false;
     })
-    .map(({ question, answer }) => ({ question, answer }));
+    .map(item => {
+      const questionRaw = typeof item?.question === 'string' ? item.question : '';
+      const question = /\s$/.test(questionRaw) ? questionRaw : `${questionRaw} `;
+      const answer = typeof item?.answer === 'string' ? item.answer : '';
+      const accept = answer ? [answer] : [];
+      return {
+        dataset: 'pot-odds',
+        question,
+        answer,
+        accept,
+        validation: { type: 'text' }
+      };
+    });
 }
 
 export function computeEquitiPracticoSelection() {
@@ -362,6 +427,73 @@ export function computeEquitiTeoricoSelection() {
   return result;
 }
 
+export function computeSprPracticoSelection() {
+  if (!sprPracticoData || sprPracticoData.length === 0) return [];
+  if (selectedSprPracticoStacks.size === 0) return [];
+  if (selectedSprPracticoPots.size === 0) return [];
+
+  const decimals = 1;
+  const multiplier = Math.pow(10, decimals);
+
+  return sprPracticoData
+    .filter(item => {
+      const stackGroup = item?.tags?.grupo_stack;
+      const potGroup = item?.tags?.grupo_bote;
+      return selectedSprPracticoStacks.has(stackGroup) && selectedSprPracticoPots.has(potGroup);
+    })
+    .map(item => {
+      const questionRaw = typeof item?.pregunta === 'string' ? item.pregunta : '';
+      const question = /\s$/.test(questionRaw) ? questionRaw : `${questionRaw} `;
+      const expectedFromSpr = typeof item?.spr === 'number' ? item.spr : null;
+      const parsedAnswer = parseFloat(String(item?.respuesta ?? '').replace(',', '.'));
+      const expected = Number.isFinite(expectedFromSpr) ? expectedFromSpr : parsedAnswer;
+      const answerStrRaw = typeof item?.respuesta === 'string' ? item.respuesta.trim() : '';
+      const computedAnswer = Number.isFinite(expected)
+        ? (Math.round(expected * multiplier) / multiplier).toFixed(decimals)
+        : '';
+      const answer = answerStrRaw || computedAnswer;
+      return {
+        dataset: 'spr-practico',
+        question,
+        answer,
+        accept: answer ? [answer] : [],
+        validation: {
+          type: 'numeric',
+          decimals,
+          target: Number.isFinite(expected) ? expected : null,
+          maxLength: answer ? Math.max(answer.length, 6) : 6
+        }
+      };
+    });
+}
+
+export function computeSprFlashcardSelection() {
+  if (selectedSprFlashcards.size === 0) return [];
+
+  const result = [];
+
+  selectedSprFlashcards.forEach(key => {
+    const source = sprFlashcardSources[key];
+    const data = source?.data;
+    if (!Array.isArray(data) || data.length === 0) return;
+    data.forEach(item => {
+      const questionRaw = typeof item?.pregunta === 'string' ? item.pregunta : '';
+      const question = /\s$/.test(questionRaw) ? questionRaw : `${questionRaw} `;
+      const answer = typeof item?.respuesta === 'string' ? item.respuesta : '';
+      const accept = answer ? [answer] : [];
+      result.push({
+        dataset: `spr-flashcards-${key}`,
+        question,
+        answer,
+        accept,
+        validation: { type: 'text' }
+      });
+    });
+  });
+
+  return result;
+}
+
 /**
  * Crea un grupo de spinner con etiqueta abreviada y envoltura de
  * corchetes.  El contenido resultante tiene la forma «< INI: [input] >».
@@ -452,6 +584,14 @@ function resetSelections() {
   potOddsStreetButtons.forEach(btn => btn.classList.remove('active'));
   if (potOddsConversionButton) potOddsConversionButton.classList.remove('active');
   updatePotOddsGating();
+
+  // Reiniciar SPR
+  selectedSprPracticoStacks.clear();
+  selectedSprPracticoPots.clear();
+  sprPracticoStackButtons.forEach(btn => btn.classList.remove('active'));
+  sprPracticoPotButtons.forEach(btn => btn.classList.remove('active'));
+  selectedSprFlashcards.clear();
+  sprFlashcardButtons.forEach(btn => btn.classList.remove('active'));
 }
 
 /**
@@ -469,8 +609,10 @@ function updateRunButtonState() {
   const potOddsAvailable = computePotOddsSelection().length > 0;
   const eqPractAvailable = computeEquitiPracticoSelection().length > 0;
   const eqTeorAvailable = computeEquitiTeoricoSelection().length > 0;
+  const sprPractAvailable = computeSprPracticoSelection().length > 0;
+  const sprFlashAvailable = computeSprFlashcardSelection().length > 0;
   const hasMathOrPoker = opSelected && (numSelected || pokerSelected);
-  if (hasMathOrPoker || potOddsAvailable || eqPractAvailable || eqTeorAvailable) {
+  if (hasMathOrPoker || potOddsAvailable || eqPractAvailable || eqTeorAvailable || sprPractAvailable || sprFlashAvailable) {
     runBtn.disabled = false;
     runBtn.classList.remove('disabled');
   } else {
@@ -567,11 +709,24 @@ export function init(container) {
   selectedEquitiPractBets.clear();
   selectedEquitiTeorFormats.clear();
   selectedEquitiTeorTypes.clear();
+  selectedSprPracticoStacks.clear();
+  selectedSprPracticoPots.clear();
+  sprPracticoStackButtons.length = 0;
+  sprPracticoPotButtons.length = 0;
+  sprPracticoData = null;
+  sprPracticoPromise = null;
+  selectedSprFlashcards.clear();
+  sprFlashcardButtons.length = 0;
+  Object.values(sprFlashcardSources).forEach(src => {
+    src.data = null;
+    src.promise = null;
+  });
   container.innerHTML = '';
 
   loadPotOddsData();
   loadEquitiPracticoData();
   loadEquitiTeoricoData();
+  loadSprPracticoData();
 
   // Crear la pantalla tipo terminal que envolverá la configuración y
   // posteriormente los ejercicios
@@ -1127,6 +1282,135 @@ potOddsFiltersRow.appendChild(divider);
   });
   equitiTeorRow.appendChild(viceversaBtn);
 
+  // ----- SPR Práctico -----
+  const sprPractBlock = document.createElement('div');
+  sprPractBlock.className = 'numa-bottom';
+  Object.assign(sprPractBlock.style, {
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '0.5rem'
+  });
+  term.appendChild(sprPractBlock);
+
+  const sprPractLabel = document.createElement('span');
+  sprPractLabel.textContent = 'SPR Práctico';
+  sprPractLabel.style.color = '#28a746';
+  sprPractLabel.style.fontSize = '0.8rem';
+  sprPractBlock.appendChild(sprPractLabel);
+
+  const sprStackRow = document.createElement('div');
+  Object.assign(sprStackRow.style, {
+    display: 'flex',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: '0.5rem'
+  });
+  sprPractBlock.appendChild(sprStackRow);
+
+  const stackDefs = [
+    { label: '15-35', value: '15-35' },
+    { label: '40-60', value: '40-60' },
+    { label: '70-100', value: '70-100' }
+  ];
+
+  stackDefs.forEach(def => {
+    const btn = document.createElement('button');
+    btn.className = 'numa-btn';
+    btn.textContent = def.label;
+    btn.addEventListener('click', () => {
+      const nowActive = !btn.classList.contains('active');
+      btn.classList.toggle('active', nowActive);
+      if (nowActive) selectedSprPracticoStacks.add(def.value);
+      else selectedSprPracticoStacks.delete(def.value);
+      loadSprPracticoData();
+      updateRunButtonState();
+    });
+    sprPracticoStackButtons.push(btn);
+    sprStackRow.appendChild(btn);
+  });
+
+  const sprPotRow = document.createElement('div');
+  Object.assign(sprPotRow.style, {
+    display: 'flex',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: '0.5rem'
+  });
+  sprPractBlock.appendChild(sprPotRow);
+
+  const potDefs = [
+    { label: '2-10', value: '2-10' },
+    { label: '12-30', value: '12-30' },
+    { label: '35-50', value: '35-50' }
+  ];
+
+  potDefs.forEach(def => {
+    const btn = document.createElement('button');
+    btn.className = 'numa-btn';
+    btn.textContent = def.label;
+    btn.addEventListener('click', () => {
+      const nowActive = !btn.classList.contains('active');
+      btn.classList.toggle('active', nowActive);
+      if (nowActive) selectedSprPracticoPots.add(def.value);
+      else selectedSprPracticoPots.delete(def.value);
+      loadSprPracticoData();
+      updateRunButtonState();
+    });
+    sprPracticoPotButtons.push(btn);
+    sprPotRow.appendChild(btn);
+  });
+
+  // ----- SPR Flashcards -----
+  const sprFlashBlock = document.createElement('div');
+  sprFlashBlock.className = 'numa-bottom';
+  Object.assign(sprFlashBlock.style, {
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '0.5rem'
+  });
+  term.appendChild(sprFlashBlock);
+
+  const sprFlashLabel = document.createElement('span');
+  sprFlashLabel.textContent = 'SPR Flashcards';
+  sprFlashLabel.style.color = '#28a746';
+  sprFlashLabel.style.fontSize = '0.8rem';
+  sprFlashBlock.appendChild(sprFlashLabel);
+
+  const sprFlashRow = document.createElement('div');
+  Object.assign(sprFlashRow.style, {
+    display: 'flex',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: '0.5rem'
+  });
+  sprFlashBlock.appendChild(sprFlashRow);
+
+  const flashDefs = [
+    { label: 'Interpretación', value: 'interpretacion' },
+    { label: 'Ejemplos', value: 'ejemplos' },
+    { label: 'Manos', value: 'manos' },
+    { label: 'Teoría', value: 'teoria' }
+  ];
+
+  flashDefs.forEach(def => {
+    const btn = document.createElement('button');
+    btn.className = 'numa-btn';
+    btn.textContent = def.label;
+    btn.addEventListener('click', () => {
+      const nowActive = !btn.classList.contains('active');
+      btn.classList.toggle('active', nowActive);
+      if (nowActive) {
+        selectedSprFlashcards.add(def.value);
+        loadSprFlashcardData(def.value);
+      } else {
+        selectedSprFlashcards.delete(def.value);
+      }
+      updateRunButtonState();
+    });
+    sprFlashcardButtons.push(btn);
+    sprFlashRow.appendChild(btn);
+  });
+
   // ----- Estadísticas -----
   statsEl = document.createElement('div');
   statsEl.id = 'numa-stats';
@@ -1179,7 +1463,9 @@ potOddsFiltersRow.appendChild(divider);
     const potOddsSeq = computePotOddsSelection();
     const eqPractSeq = computeEquitiPracticoSelection();
     const eqTeorSeq = computeEquitiTeoricoSelection();
-    const combined = [...expressions, ...potOddsSeq, ...eqPractSeq, ...eqTeorSeq];
+    const sprPractSeq = computeSprPracticoSelection();
+    const sprFlashSeq = computeSprFlashcardSelection();
+    const combined = [...expressions, ...potOddsSeq, ...eqPractSeq, ...eqTeorSeq, ...sprPractSeq, ...sprFlashSeq];
     // Iniciar la sesión
     runSession({
       expressions: combined,
@@ -1193,8 +1479,10 @@ potOddsFiltersRow.appendChild(divider);
       const potCount = potOddsSeq.length;
       const eqPractCount = eqPractSeq.length;
       const eqTeorCount = eqTeorSeq.length;
+      const sprPractCount = sprPractSeq.length;
+      const sprFlashCount = sprFlashSeq.length;
       const estimated = Math.ceil(total * 5);
-      statsEl.textContent = `Total: ${total} (Pot Odds: ${potCount}, Eq Práct: ${eqPractCount}, Eq Teo: ${eqTeorCount})  Est. tiempo: ${estimated}s`;
+      statsEl.textContent = `Total: ${total} (Pot Odds: ${potCount}, Eq Práct: ${eqPractCount}, Eq Teo: ${eqTeorCount}, SPR Práct: ${sprPractCount}, SPR Flash: ${sprFlashCount})  Est. tiempo: ${estimated}s`;
     }
      // ⏱ Arrancar cronómetro 1s después de comenzar
   // ⏱ Arrancar cronómetro 1s después de comenzar SOLO si está activo
